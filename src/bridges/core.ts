@@ -11,6 +11,7 @@ export type EditorContentType = 'html' | 'text' | 'json';
 
 type CoreEditorState = {
   selection: { from: number; to: number };
+  selectedText: string;
   isFocused: boolean;
   isReady: boolean;
   editable: boolean;
@@ -18,6 +19,11 @@ type CoreEditorState = {
 };
 
 type FocusArgs = 'start' | 'end' | 'all' | number | boolean | null;
+
+type ThemeColors = {
+  backgroundColor: string;
+  textColor: string;
+};
 
 type CoreEditorInstance = {
   getHTML: () => Promise<string>;
@@ -31,6 +37,7 @@ type CoreEditorInstance = {
   injectJS: (js: string) => void;
   injectCSS: (css: string, tag?: string) => void;
   setEditable: (editable: boolean) => void;
+  setTheme: (colors: ThemeColors) => void;
   theme: EditorTheme;
 };
 
@@ -344,16 +351,41 @@ export const CoreBridge = new BridgeExtension<
           payload: editable,
         });
       },
+      setTheme: (colors: ThemeColors) => {
+        // Inject CSS to update the theme colors in the webview
+        const themeCSS = `
+          html, body {
+            background-color: ${colors.backgroundColor} !important;
+            color: ${colors.textColor} !important;
+          }
+          .ProseMirror {
+            background-color: ${colors.backgroundColor} !important;
+            color: ${colors.textColor} !important;
+          }
+        `;
+        webviewRef?.current?.injectJavaScript(`
+          (function() {
+            var style = document.getElementById('tentap-theme-css');
+            if (!style) {
+              style = document.createElement('style');
+              style.id = 'tentap-theme-css';
+              document.head.appendChild(style);
+            }
+            style.textContent = \`${themeCSS}\`;
+          })();
+          true;
+        `);
+      },
     };
   },
   extendEditorState: (editor) => {
+    const { from, to } = editor.state.selection;
     return {
       isFocused: focusListener.isFocused,
       isReady: true,
-      selection: {
-        from: editor.state.selection.from,
-        to: editor.state.selection.to,
-      },
+      selection: { from, to },
+      selectedText:
+        from !== to ? editor.state.doc.textBetween(from, to, ' ') : '',
       editable: editor.isEditable,
       empty: editor.isEmpty,
     };

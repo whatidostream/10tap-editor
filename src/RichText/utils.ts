@@ -1,6 +1,22 @@
 import { Platform } from 'react-native';
 import type BridgeExtension from '../bridges/base';
 import type { EditorBridge } from '../types';
+import { editorHtml } from '../simpleWebEditor/build/editorHtml';
+
+/**
+ * Creates HTML with background color pre-injected to prevent flash on load.
+ * This injects the background color directly into the HTML template before the WebView loads it.
+ * @param backgroundColor - The background color to inject (e.g., '#1C1C1E' or 'white')
+ * @returns The modified HTML string with background color applied
+ */
+export const createThemedHtml = (backgroundColor: string): string => {
+  // Inject a style tag right after <head> to set background color immediately
+  // This ensures the background is set before any other content loads
+  const bgStyle = `<style id="tentap-theme-preload">html,body{background-color:${backgroundColor}!important;}</style>`;
+
+  // Insert after the opening <head> tag
+  return editorHtml.replace(/<head[^>]*>/i, `$&${bgStyle}`);
+};
 
 /**
  * Creates a new style element and appends it to the head of the document.
@@ -42,7 +58,8 @@ export const getInjectedJS = (bridgeExtensions: BridgeExtension[]) => {
  * Get js code to inject into webview before the content loads
  */
 export const getInjectedJSBeforeContentLoad = (editor: EditorBridge) => {
-  return formatForInjection(`${
+  return formatForInjection(`
+  ${
     editor.bridgeExtensions
       ? `
       window.bridgeExtensionConfigMap = '${JSON.stringify(
@@ -72,6 +89,13 @@ export const getInjectedJSBeforeContentLoad = (editor: EditorBridge) => {
     window.dynamicHeight = ${editor.dynamicHeight};
     window.contentInjected = true;
     window.platform = "${Platform.OS}";
+    (function() {
+      var bgColor = '${
+        (editor.theme?.webview as any)?.backgroundColor || 'white'
+      }';
+      document.documentElement.style.backgroundColor = bgColor;
+      if (document.body) { document.body.style.backgroundColor = bgColor; }
+    })();
   `);
 };
 

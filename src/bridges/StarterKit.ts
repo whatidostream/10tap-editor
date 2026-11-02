@@ -18,6 +18,10 @@ import { ImageBridge } from './image';
 import { PlaceholderBridge } from './placeholder';
 import { DropCursorBridge } from './dropcursor';
 import { HardBreakBridge } from './br';
+import { TableBridge } from './table';
+import { CodeBlockBridge } from './codeBlock';
+import { HorizontalRuleBridge } from './horizontalRule';
+import { TextEditingBridge } from './textEditing';
 
 export const TenTapStartKit = [
   BoldBridge,
@@ -40,4 +44,8 @@ export const TenTapStartKit = [
   ListItemBridge,
   DropCursorBridge,
   HardBreakBridge,
+  TableBridge,
+  CodeBlockBridge,
+  HorizontalRuleBridge,
+  TextEditingBridge,
 ];

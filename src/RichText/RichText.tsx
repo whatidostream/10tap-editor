@@ -45,16 +45,29 @@ export const RichText = ({
   editor,
   onMessage,
   exclusivelyUseCustomOnMessage = true,
+  style: propStyle,
+  containerStyle: propContainerStyle,
   ...props
 }: RichTextProps) => {
   const [editorHeight, setEditorHeight] = useState(0);
   const [key, setKey] = useState('webview');
   const [loaded, setLoaded] = useState(isFabric());
   const { keyboardHeight, isKeyboardUp } = useKeyboard();
+  // Get background color from theme for HTML injection
+  const bgColor =
+    (editor.theme?.webview as { backgroundColor?: string } | undefined)
+      ?.backgroundColor || 'white';
+
+  // Inject background color directly into HTML to prevent flash
+  const getThemedHtml = (html: string) => {
+    const bgStyle = `<style id="tentap-bg">html,body{background-color:${bgColor}!important;}</style>`;
+    return html.replace(/<head[^>]*>/i, `$&${bgStyle}`);
+  };
+
   const source: WebViewProps['source'] = editor.DEV
     ? { uri: editor.DEV_SERVER_URL || DEV_SERVER_URL }
     : {
-        html: editor.customSource || editorHtml,
+        html: getThemedHtml(editor.customSource || editorHtml),
         baseUrl: editor.webviewBaseURL,
       };
 
@@ -129,10 +142,12 @@ export const RichText = ({
           RichTextStyles.fullScreen,
           { display: loaded ? 'flex' : 'none' },
           editor.theme.webview,
+          propStyle,
         ]}
         containerStyle={[
           editor.theme.webviewContainer,
           { height: editor.dynamicHeight ? editorHeight : undefined },
+          propContainerStyle,
         ]}
         source={source}
         injectedJavaScript={injectedJavaScript}

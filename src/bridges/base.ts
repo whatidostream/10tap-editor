@@ -108,7 +108,10 @@ class BridgeExtension<T = any, E = any, M = any> {
         this.tiptapExtension = this.tiptapExtension?.extend(extendConfig);
       }
     }
-    return [this.tiptapExtension, ...(this.tiptapExtensionDeps || [])];
+    // A bridge may have no tiptap extension of its own (messages only).
+    return [this.tiptapExtension, ...(this.tiptapExtensionDeps || [])].filter(
+      (e): e is AnyExtension => !!e
+    );
   }
 }
 export default BridgeExtension;
