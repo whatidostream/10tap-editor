@@ -10,6 +10,7 @@ import { BulletListBridge } from './bulletList';
 import { BlockquoteBridge } from './blockquote';
 import { UnderlineBridge } from './underline';
 import { TaskListBridge } from './tasklist';
+import { RadioListBridge } from './radioList';
 import { LinkBridge } from './link';
 import { ColorBridge } from './color';
 import { HighlightBridge } from './highlight';
@@ -36,6 +37,7 @@ export const TenTapStartKit = [
   BulletListBridge,
   BlockquoteBridge,
   TaskListBridge,
+  RadioListBridge,
   LinkBridge,
   ColorBridge,
   HighlightBridge,
