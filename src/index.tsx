@@ -30,3 +30,4 @@ export * from './utils';
 export { Images } from './assets';
 export { EditorHelper } from './RichText/EditorHelper';
 export { editorHtml } from './simpleWebEditor/build/editorHtml';
+export * from './bridges/section';
