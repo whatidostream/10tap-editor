@@ -24,7 +24,7 @@
  * writing-richtext-roundtrip checks it is in step).
  */
 
- 
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 /** The attribute naming an atom's kind, and the one holding its source. */
 export const WRITING_KIND_ATTR = 'data-ik-src';
