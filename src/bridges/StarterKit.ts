@@ -11,6 +11,7 @@ import { BlockquoteBridge } from './blockquote';
 import { UnderlineBridge } from './underline';
 import { TaskListBridge } from './tasklist';
 import { RadioListBridge } from './radioList';
+import { WritingBridge } from './writing';
 import { LinkBridge } from './link';
 import { ColorBridge } from './color';
 import { HighlightBridge } from './highlight';
@@ -50,4 +51,5 @@ export const TenTapStartKit = [
   CodeBlockBridge,
   HorizontalRuleBridge,
   TextEditingBridge,
+  WritingBridge,
 ];
