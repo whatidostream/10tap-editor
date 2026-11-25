@@ -9,7 +9,7 @@
  *
  *   doc            → ikSection+
  *   ikSection      → ikSectionTitle ikSectionBody? ikSection*     attrs: itemId, open
- *   ikSectionTitle → text*            (plain: a title has no marks)
+ *   ikSectionTitle → text*            (plain: a title has no marks)   attrs: scene
  *   ikSectionBody  → block+           (the item's description, as rich text)
  *
  * Memory (the reason for D2): only OPEN sections hold their body. A closed section is
@@ -46,11 +46,19 @@ export interface SectionOutline {
   title: string;
   open: boolean;
   children: SectionOutline[];
+  /** The title is a screenplay scene heading (writing/fountain fountainTitleRole): styled as one. */
+  scene?: boolean;
 }
 
+/** The class a scene title carries (the Writing view's preview uses the same one). */
+export const SCENE_TITLE_CLASS = 'ik-section__title--scene';
+
 /** ProseMirror JSON for a section title. */
-function titleJSON(title: string): any {
-  return title ? { type: SECTION_TITLE_NODE, content: [{ type: 'text', text: title }] } : { type: SECTION_TITLE_NODE };
+function titleJSON(title: string, scene = false): any {
+  const node: any = { type: SECTION_TITLE_NODE };
+  if (scene) node.attrs = { scene: true };
+  if (title) node.content = [{ type: 'text', text: title }];
+  return node;
 }
 
 /** A body's JSON from its block content; an empty body is one empty paragraph. */
@@ -66,7 +74,7 @@ export function bodyJSON(blocks: any[] | null | undefined): any {
  */
 export function buildSectionDocJSON(outline: SectionOutline[], bodyFor: (itemId: string) => any[] | null): any {
   const section = (node: SectionOutline): any => {
-    const content: any[] = [titleJSON(node.title)];
+    const content: any[] = [titleJSON(node.title, !!node.scene)];
     if (node.open) content.push(bodyJSON(bodyFor(node.itemId)));
     for (const child of node.children) content.push(section(child));
     return { type: SECTION_NODE, attrs: { itemId: node.itemId, open: !!node.open }, content };
@@ -252,7 +260,32 @@ export function replaceSectionTitle(tr: any, itemId: string, title: string): boo
   const titleNode = node.firstChild;
   if (!titleNode || titleNode.type.name !== SECTION_TITLE_NODE) return false;
   const schema = tr.doc.type.schema;
-  tr.replaceWith(pos + 1, pos + 1 + titleNode.nodeSize, schema.nodeFromJSON(titleJSON(title)));
+  tr.replaceWith(pos + 1, pos + 1 + titleNode.nodeSize, schema.nodeFromJSON(titleJSON(title, !!titleNode.attrs?.scene)));
+  tr.setMeta(LOAD_META, true);
+  tr.setMeta('addToHistory', false);
+  return true;
+}
+
+/** Whether a section's title is drawn as a scene heading. */
+export function sectionTitleScene(doc: any, itemId: string): boolean | null {
+  const hit = findSection(doc, itemId);
+  const titleNode = hit?.node.firstChild;
+  if (!titleNode || titleNode.type.name !== SECTION_TITLE_NODE) return null;
+  return !!titleNode.attrs?.scene;
+}
+
+/**
+ * Mark a section's title as a scene heading or not (its format or its role
+ * changed): the attribute only, so the text, the cursor and undo are untouched
+ * (LOAD, not an edit). False when there is nothing to change.
+ */
+export function setSectionTitleScene(tr: any, itemId: string, scene: boolean): boolean {
+  const hit = findSection(tr.doc, itemId);
+  if (!hit) return false;
+  const titleNode = hit.node.firstChild;
+  if (!titleNode || titleNode.type.name !== SECTION_TITLE_NODE) return false;
+  if (!!titleNode.attrs?.scene === !!scene) return false;
+  tr.setNodeMarkup(hit.pos + 1, undefined, { ...titleNode.attrs, scene: !!scene });
   tr.setMeta(LOAD_META, true);
   tr.setMeta('addToHistory', false);
   return true;
@@ -404,12 +437,21 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
     content: 'text*',
     marks: '',
     defining: true,
+    addAttributes() {
+      return {
+        // A screenplay scene's title (fountain): drawn as the scene heading.
+        scene: {
+          default: false,
+          parseHTML: (el: any) => !!el.classList?.contains(SCENE_TITLE_CLASS),
+          renderHTML: () => ({}),
+        },
+      };
+    },
     parseHTML() {
       return [1, 2, 3, 4, 5, 6].map((n) => ({ tag: `h${n}[data-ik-section-title]` }));
     },
     renderHTML({ node }: any) {
-      void node;
-      return ['h2', { 'data-ik-section-title': '', class: 'ik-section__title' }, 0];
+      return ['h2', { 'data-ik-section-title': '', class: node.attrs?.scene ? `ik-section__title ${SCENE_TITLE_CLASS}` : 'ik-section__title' }, 0];
     },
     addNodeView() {
       if (!domPort) return null as any;
@@ -424,7 +466,10 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
         dom.className = 'ik-section__title';
         dom.setAttribute('data-ik-section-title', '');
         dom.setAttribute('data-placeholder', options.untitledLabel || 'Untitled');
-        const mark = (n: any) => dom.classList.toggle('is-empty', n.content.size === 0);
+        const mark = (n: any) => {
+          dom.classList.toggle('is-empty', n.content.size === 0);
+          dom.classList.toggle(SCENE_TITLE_CLASS, !!n.attrs?.scene);
+        };
         mark(node);
         return {
           dom,

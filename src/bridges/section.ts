@@ -14,6 +14,7 @@ import {
   closeSection,
   replaceSectionBody,
   replaceSectionTitle,
+  setSectionTitleScene,
   findSection,
   readSection,
   SECTION_NODE,
@@ -93,7 +94,12 @@ type SectionMessage =
   | { type: SectionActionType.Close; payload: { itemId: string } }
   | {
       type: SectionActionType.Replace;
-      payload: { itemId: string; title?: string; html?: string };
+      payload: {
+        itemId: string;
+        title?: string;
+        html?: string;
+        scene?: boolean;
+      };
     }
   | { type: SectionActionType.State; payload: { requestId: string } }
   | SectionEditorMessage;
@@ -105,9 +111,10 @@ type SectionEditorInstance = {
   ) => void;
   openSection: (itemId: string, html: string) => void;
   closeSection: (itemId: string) => void;
+  /** `scene`: the title is (or stops being) a screenplay scene heading. */
   replaceSection: (
     itemId: string,
-    change: { title?: string; html?: string }
+    change: { title?: string; html?: string; scene?: boolean }
   ) => void;
   requestSectionState: (requestId: string) => void;
   /** Set by the app: receives the editor's section messages. */
@@ -349,7 +356,13 @@ function handleSectionMessage(editor: any, message: SectionMessage): boolean {
     return true;
   }
   if (message.type === SectionActionType.Replace) {
-    const { itemId, title, html } = message.payload;
+    const { itemId, title, html, scene } = message.payload;
+    // The scene mark is an attribute: set even under the cursor (the text is untouched).
+    if (typeof scene === 'boolean') {
+      const str = ed.state.tr;
+      if (setSectionTitleScene(str, itemId, scene)) ed.view.dispatch(str);
+    }
+    if (typeof title !== 'string' && typeof html !== 'string') return true;
     // Never under the cursor, nor over an edit not yet sent.
     if (itemId === cursorSectionId(ed) || pending.has(itemId)) return true;
     const tr = ed.state.tr;
