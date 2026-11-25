@@ -11,6 +11,7 @@
  *   $$ ⏎ … ⏎ $$  ```math       ikMathBlock (block atom)
  *   [^1]                       ikFootnoteRef (inline atom)
  *   [^1]: note (+ indented)    ikFootnoteDef (block atom)
+ *   Term ⏎ : definition        ikDefList (block atom: the whole definition list)
  *   {++…++} {--…--} {~~a~>b~~} {==…==}{>>…<<} {>>…<<}   ikCritic (inline atom)
  *   H~2~O  x^2^  ==text==      subscript / superscript / highlight marks
  *   \$ \~ \^ \= \{             ikEscape mark (the character stays text; saved escaped)
@@ -32,7 +33,7 @@ export const WRITING_SOURCE_ATTR = 'data-source';
 /** The attribute marking an escaped character (`\$` and friends). */
 export const WRITING_ESCAPE_ATTR = 'data-ik-esc';
 
-export type WritingAtomKind = 'math' | 'mathBlock' | 'footnoteRef' | 'footnoteDef' | 'critic';
+export type WritingAtomKind = 'math' | 'mathBlock' | 'footnoteRef' | 'footnoteDef' | 'critic' | 'defList';
 
 /** Node name for each atom kind. */
 export const WRITING_ATOM_NODES: Record<WritingAtomKind, string> = {
@@ -41,9 +42,22 @@ export const WRITING_ATOM_NODES: Record<WritingAtomKind, string> = {
   footnoteRef: 'ikFootnoteRef',
   footnoteDef: 'ikFootnoteDef',
   critic: 'ikCritic',
+  defList: 'ikDefList',
 };
 
-const BLOCK_KINDS: WritingAtomKind[] = ['mathBlock', 'footnoteDef'];
+const BLOCK_KINDS: WritingAtomKind[] = ['mathBlock', 'footnoteDef', 'defList'];
+
+/**
+ * The Rich-text bar's insert buttons (toolbarButtons.json ids `math`, `mathBlock`,
+ * `footnote`): each runs the editor command `insertWritingAtom(id)`, which puts a
+ * new atom in and opens its source box straight away.
+ */
+export type WritingInsertKind = 'math' | 'mathBlock' | 'footnote';
+export const WRITING_INSERT_BUTTONS: readonly WritingInsertKind[] = ['math', 'mathBlock', 'footnote'];
+
+export function isWritingInsertButton(id: string): id is WritingInsertKind {
+  return (WRITING_INSERT_BUTTONS as readonly string[]).includes(id);
+}
 
 /** True for the block atoms (they sit between paragraphs). */
 export function isBlockWritingKind(kind: string): boolean {
@@ -70,6 +84,9 @@ div.ik-wr { display: block; margin: .5em 0; padding: 2px 4px; }
 .ik-wr--footnoteDef { font-size: .9em; border-left: 3px solid rgba(127,127,127,.4); }
 .ik-wr__fnlabel { font-weight: 600; margin-right: 6px; color: var(--ik-wr-accent, #2f6fde); }
 .ik-wr__fnlabel::after { content: "."; }
+.ik-wr__dl { margin: 0; }
+.ik-wr__dl dt { font-weight: 600; margin: .25em 0 0; }
+.ik-wr__dl dd { margin: 0 0 0 1.5em; white-space: pre-wrap; }
 .ik-wr ins.critic-ins { background: rgba(46,160,67,.18); text-decoration: underline; text-decoration-color: rgba(46,160,67,.9); color: inherit; }
 .ik-wr del.critic-del { background: rgba(248,81,73,.15); text-decoration: line-through; text-decoration-color: rgba(220,50,40,.9); color: inherit; }
 .ik-wr mark.critic-mark { background: rgba(255,214,10,.3); color: inherit; }
@@ -167,12 +184,75 @@ export function criticPartsOf(source: string): { kind: ReturnType<typeof criticK
 }
 
 /**
- * The extensions: five atoms and four marks (three without highlight). Add them
+ * A definition list's source as terms and definitions, for drawing it: a line
+ * `: text` is a definition, an indented line continues the one before, blank
+ * lines are skipped, any other line is a term (a term after a definition starts
+ * the next group).
+ */
+export function definitionListOf(source: string): Array<{ terms: string[]; defs: string[] }> {
+  const groups: Array<{ terms: string[]; defs: string[] }> = [];
+  let group: { terms: string[]; defs: string[] } | null = null;
+  for (const line of String(source || '').split('\n')) {
+    if (!/\S/.test(line)) continue;
+    const def = /^:[ \t]+(.*)$/.exec(line);
+    if (def) {
+      if (!group) groups.push((group = { terms: [], defs: [] }));
+      group.defs.push(def[1] ?? '');
+      continue;
+    }
+    const cont = /^(?: {2,}|\t)(\S.*)$/.exec(line);
+    if (cont && group && group.defs.length) {
+      group.defs[group.defs.length - 1] += `\n${cont[1]}`;
+      continue;
+    }
+    if (!group || group.defs.length) groups.push((group = { terms: [], defs: [] }));
+    group.terms.push(line.trim());
+  }
+  return groups;
+}
+
+/** The highest numbered footnote label in an editor document, plus one. */
+function nextFootnoteNumber(doc: any): number {
+  let max = 0;
+  doc.descendants((n: any) => {
+    if (n.type.name === WRITING_ATOM_NODES.footnoteRef || n.type.name === WRITING_ATOM_NODES.footnoteDef) {
+      const re = /\[\^(\d+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(n.attrs.source || ''))) max = Math.max(max, Number(m[1]));
+    } else if (n.isText) {
+      const re = /\[\^(\d+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(n.text || ''))) max = Math.max(max, Number(m[1]));
+    }
+    return true;
+  });
+  return max + 1;
+}
+
+/**
+ * A just-inserted atom whose source box opens at once: where the caret goes, the
+ * source that means "nothing typed" (that, or an emptied box, or Escape, takes the
+ * atom out again), the text it wrapped (put back instead) and, for a footnote, the
+ * reference that goes with the note.
+ */
+interface FreshAtom {
+  kind: WritingAtomKind;
+  source: string;
+  caret: [number, number];
+  empty: string | null;
+  restore: string;
+  ref?: string;
+}
+
+/**
+ * The extensions: six atoms and four marks (three without highlight). Add them
  * after StarterKit.
  */
 export function createWritingExtensions(deps: WritingExtensionDeps, options: WritingExtensionOptions = {}): any[] {
   const { Node, Mark, dom: domPort, loadKatex, resolveCritic } = deps;
   const labels: WritingLabels = { ...DEFAULT_LABELS, ...(options.labels || {}) };
+  // The atom insertWritingAtom just put in: its view opens the source box when it is made.
+  let pendingFresh: FreshAtom | null = null;
 
   const el = (tag: string, className?: string, text?: string): any => {
     const e = domPort!.createElement(tag);
@@ -199,6 +279,15 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
     }
     if (kind === 'footnoteRef') {
       view.appendChild(el('sup', 'ik-wr__fnref', footnoteLabelOf(source) || source));
+      return;
+    }
+    if (kind === 'defList') {
+      const list = el('dl', 'ik-wr__dl');
+      definitionListOf(source).forEach((g) => {
+        g.terms.forEach((term) => list.appendChild(el('dt', '', term)));
+        g.defs.forEach((def) => list.appendChild(el('dd', '', def)));
+      });
+      view.appendChild(list);
       return;
     }
     if (kind === 'footnoteDef') {
@@ -266,14 +355,37 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
       else tr.setNodeMarkup(pos, undefined, { ...current.attrs, source: value });
       editor.view.dispatch(tr);
     };
+    // A new atom left as it came (or emptied, or Escaped): out it goes, with the
+    // footnote reference made with it; wrapped text comes back as it was.
+    const discard = (fresh: FreshAtom) => {
+      if (typeof getPos !== 'function') return;
+      const pos = getPos();
+      if (typeof pos !== 'number') return;
+      const { state } = editor.view;
+      const tr = state.tr;
+      const ranges: Array<[number, number]> = [[pos, pos + current.nodeSize]];
+      if (fresh.ref) {
+        state.doc.descendants((n: any, p: number) => {
+          if (n.type.name === WRITING_ATOM_NODES.footnoteRef && n.attrs.source === fresh.ref) ranges.push([p, p + n.nodeSize]);
+          return true;
+        });
+      }
+      ranges.sort((a, b) => b[0] - a[0]).forEach(([a, b]) => {
+        if (a === pos && fresh.restore) tr.replaceWith(a, b, state.schema.text(fresh.restore));
+        else tr.delete(a, b);
+      });
+      editor.view.dispatch(tr);
+    };
     const close = (keep: boolean) => {
       if (!editing) return;
       const value = editing.input.value;
+      const fresh: FreshAtom | null = editing.fresh || null;
       editing.box.remove();
       editing = null;
       root.classList.remove('is-editing');
       view.style.display = '';
-      if (keep && value !== current.attrs.source) setSource(value);
+      if (fresh && (!keep || !value.trim() || (fresh.empty !== null && value.trim() === fresh.empty.trim()))) discard(fresh);
+      else if (keep && value !== current.attrs.source) setSource(value);
       editor?.commands?.focus?.();
     };
     const button = (label: string, className: string, onPress: () => void) => {
@@ -283,7 +395,7 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
       b.addEventListener('click', (e: any) => { e.preventDefault(); e.stopPropagation(); onPress(); });
       return b;
     };
-    const open = () => {
+    const open = (fresh?: FreshAtom) => {
       if (editing || !editor?.isEditable) return;
       const source = current.attrs.source || '';
       const multiline = tag === 'div' || source.includes('\n');
@@ -294,7 +406,7 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
       input.setAttribute('aria-label', labels.edit);
       input.setAttribute('spellcheck', 'false');
       if (multiline) input.rows = Math.min(12, Math.max(2, source.split('\n').length + 1));
-      else input.size = Math.max(4, Math.min(60, source.length + 2));
+      else input.size = Math.max(fresh ? 16 : 4, Math.min(60, source.length + 2));
       box.appendChild(input);
       box.appendChild(button(labels.done, 'ik-wr__done', () => close(true)));
       if (kind === 'critic' && resolveCritic && criticKindOf(source)) {
@@ -313,13 +425,20 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
         else if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); close(true); }
       });
       input.addEventListener('blur', () => { setTimeout(() => { if (editing && editing.input === input) close(true); }, 0); });
-      editing = { box, input };
+      editing = { box, input, fresh };
       root.classList.add('is-editing');
       view.style.display = 'none';
       root.appendChild(box);
       input.focus();
-      if (!multiline) input.select?.();
+      if (fresh) input.setSelectionRange?.(fresh.caret[0], fresh.caret[1]);
+      else if (!multiline) input.select?.();
     };
+    // Just inserted by the bar: open once the view is in the page.
+    if (pendingFresh && pendingFresh.kind === kind && pendingFresh.source === (node.attrs.source || '')) {
+      const fresh = pendingFresh;
+      pendingFresh = null;
+      setTimeout(() => open(fresh), 0);
+    }
     root.addEventListener('mousedown', (e: any) => {
       if (editing && editing.box.contains(e.target)) return;
       e.preventDefault();
@@ -377,7 +496,66 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
         if (!domPort) return null as any;
         return nodeView(kind, tag);
       },
+      ...(kind === 'math' ? { addCommands() { return { insertWritingAtom: insertCommand }; } } : {}),
     });
+  };
+
+  /**
+   * insertWritingAtom(what): the bar's maths, display-maths and footnote buttons.
+   * - math: `$…$` at the caret, or around the selected text (in one block);
+   * - mathBlock: `$$ ⏎ ⏎ $$` after the block holding the selection (kept), as the
+   *   bar's line and table do;
+   * - footnote: `[^n]` after the selection (n one more than the highest) and its
+   *   note `[^n]: ` at the end of the document.
+   * The new atom's source box opens at once (with a DOM port), the caret where
+   * the typing goes; left as it came, or Escaped, the atom goes again. False when
+   * nothing could be inserted there (a code block, say).
+   */
+  const insertCommand = (what: WritingInsertKind) => ({ state, tr, dispatch }: any) => {
+    const { schema, selection } = state;
+    const make = (k: WritingAtomKind, source: string) => schema.nodes[WRITING_ATOM_NODES[k]]?.create({ source });
+    const $to = selection.$to;
+    const inText = !selection.node && $to.parent.inlineContent && !$to.parent.type.spec.code;
+    const afterBlock = () => ($to.parent.isTextblock && $to.depth > 0 ? $to.after() : selection.to);
+    let fresh: FreshAtom | null = null;
+    const steps = tr.steps.length;
+    if (what === 'math') {
+      if (!inText) return false;
+      const wrap = !selection.empty && selection.$from.sameParent($to)
+        ? state.doc.textBetween(selection.from, selection.to, '', '') : '';
+      const source = `$${wrap}$`;
+      const atomNode = make('math', source);
+      if (!atomNode) return false;
+      if (!dispatch) return true;
+      tr.replaceWith(wrap ? selection.from : selection.to, selection.to, atomNode);
+      fresh = { kind: 'math', source, caret: wrap ? [1, source.length - 1] : [1, 1], empty: wrap ? null : '$$', restore: wrap };
+    } else if (what === 'mathBlock') {
+      const source = '$$\n\n$$';
+      const atomNode = make('mathBlock', source);
+      if (!atomNode) return false;
+      if (!dispatch) return true;
+      tr.insert(afterBlock(), atomNode);
+      fresh = { kind: 'mathBlock', source, caret: [3, 3], empty: source, restore: '' };
+    } else if (what === 'footnote') {
+      if (!inText) return false;
+      const ref = `[^${nextFootnoteNumber(state.doc)}]`;
+      const note = `${ref}: `;
+      const refNode = make('footnoteRef', ref);
+      const noteNode = make('footnoteDef', note);
+      if (!refNode || !noteNode) return false;
+      if (!dispatch) return true;
+      tr.insert(selection.to, refNode);
+      if (tr.steps.length === steps) return false;
+      const before = tr.steps.length;
+      tr.insert(tr.doc.content.size, noteNode);
+      // A document that holds no block at its end (the Writing view's sections): after the block instead.
+      if (tr.steps.length === before) tr.insert(tr.mapping.map(afterBlock()), noteNode);
+      fresh = { kind: 'footnoteDef', source: note, caret: [note.length, note.length], empty: note, restore: '', ref };
+    } else return false;
+    if (tr.steps.length === steps) return false;
+    // (Focusing the box brings it into view.)
+    pendingFresh = fresh;
+    return true;
   };
 
   const Subscript = Mark.create({
@@ -411,7 +589,7 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
   });
 
   const out = [
-    atom('math'), atom('mathBlock'), atom('footnoteRef'), atom('footnoteDef'), atom('critic'),
+    atom('math'), atom('mathBlock'), atom('footnoteRef'), atom('footnoteDef'), atom('critic'), atom('defList'),
     Subscript, Superscript, Escape,
   ];
   if (options.highlight !== false) out.push(Highlight);
