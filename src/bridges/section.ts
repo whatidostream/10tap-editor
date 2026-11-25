@@ -5,6 +5,7 @@ declare const window: any;
 import { Node, Extension } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { DOMParser as PMDOMParser, DOMSerializer } from '@tiptap/pm/model';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import BridgeExtension from './base';
 import {
   createSectionExtensions,
@@ -12,6 +13,8 @@ import {
   loadSectionDocument,
   openSection,
   closeSection,
+  parkSection,
+  sectionEdits,
   replaceSectionBody,
   replaceSectionTitle,
   setSectionTitleScene,
@@ -34,10 +37,12 @@ import {
  * (the page builds the section nodes from that config; the bridge has no
  * tiptap extension of its own until then).
  *
- * App → editor: loadSections, openSection, closeSection, replaceSection,
+ * App → editor: loadSections, openSection, closeSection, windowSections
+ * (load / park many at once, for the text window), replaceSection,
  * requestSectionState. Editor → app (editor.sectionListener): section-changed
  * [{ itemId, title, html }], section-toggle, section-menu, section-drop,
- * section-state.
+ * section-state, section-viewport (the open sections on or near the screen,
+ * and the caret's), section-unpark (a parked section's line was tapped).
  */
 
 export enum SectionActionType {
@@ -46,6 +51,7 @@ export enum SectionActionType {
   Close = 'section-close',
   Replace = 'section-replace',
   State = 'section-state-request',
+  Window = 'section-window',
 }
 
 export enum SectionEditorMessageType {
@@ -54,6 +60,8 @@ export enum SectionEditorMessageType {
   Menu = 'section-menu',
   Drop = 'section-drop',
   State = 'section-state',
+  Viewport = 'section-viewport',
+  Unpark = 'section-unpark',
 }
 
 export type SectionEditorMessage =
@@ -83,7 +91,12 @@ export type SectionEditorMessage =
   | {
       type: SectionEditorMessageType.State;
       payload: { requestId: string; data: any };
-    };
+    }
+  | {
+      type: SectionEditorMessageType.Viewport;
+      payload: { near: string[]; cursor: string | null };
+    }
+  | { type: SectionEditorMessageType.Unpark; payload: { itemId: string } };
 
 type SectionMessage =
   | {
@@ -102,6 +115,14 @@ type SectionMessage =
       };
     }
   | { type: SectionActionType.State; payload: { requestId: string } }
+  | {
+      type: SectionActionType.Window;
+      payload: {
+        load: Array<{ itemId: string; html: string }>;
+        park: Array<{ itemId: string; label: string }>;
+        margin?: number;
+      };
+    }
   | SectionEditorMessage;
 
 type SectionEditorInstance = {
@@ -117,6 +138,17 @@ type SectionEditorInstance = {
     change: { title?: string; html?: string; scene?: boolean }
   ) => void;
   requestSectionState: (requestId: string) => void;
+  /**
+   * The text window: load these sections' text and park these (open, title and a
+   * greyed label only), in one step that keeps what is on screen where it is.
+   * `margin`: how many screen heights above and below count as near, for the
+   * section-viewport reports the page sends from then on.
+   */
+  windowSections: (
+    load: Array<{ itemId: string; html: string }>,
+    park: Array<{ itemId: string; label: string }>,
+    margin?: number
+  ) => void;
   /** Set by the app: receives the editor's section messages. */
   sectionListener?: (message: SectionEditorMessage) => void;
 };
@@ -174,16 +206,15 @@ function flushChanges() {
     titleChanged: boolean;
     bodyChanged: boolean;
   }> = [];
-  pending.forEach((parts, itemId) => {
-    const hit = findSection(ed.state.doc, itemId);
-    if (!hit) return;
-    const { title, body } = readSection(hit.node);
+  // A section with no body (parked or closed) never reports a body: its text
+  // is never sent as empty.
+  sectionEdits(ed.state.doc, pending).forEach((edit) => {
     out.push({
-      itemId,
-      title,
-      html: parts.body ? htmlFromBody(ed.schema, body) : null,
-      titleChanged: parts.title,
-      bodyChanged: parts.body,
+      itemId: edit.itemId,
+      title: edit.title,
+      html: edit.bodyChanged ? htmlFromBody(ed.schema, edit.body) : null,
+      titleChanged: edit.titleChanged,
+      bodyChanged: edit.bodyChanged,
     });
   });
   pending.clear();
@@ -199,6 +230,80 @@ function cursorSectionId(ed: any): string | null {
   for (let d = $from.depth; d > 0; d -= 1) {
     if ($from.node(d).type.name === SECTION_NODE)
       return $from.node(d).attrs.itemId;
+  }
+  return null;
+}
+
+// The text window: which open sections are on or near the screen, and the
+// caret's, reported after a scroll settles or the caret moves to another section.
+let viewportMargin = -1; // < 0: not asked for (no window), no reports
+let viewportTimer: any = null;
+let lastViewport = '';
+let viewportInstalled = false;
+const VIEWPORT_DELAY_MS = 180;
+
+function reportViewport(force = false) {
+  clearTimeout(viewportTimer);
+  viewportTimer = null;
+  const ed = currentEditor;
+  if (!ed || ed.isDestroyed || viewportMargin < 0) return;
+  const h = window.innerHeight || 800;
+  const top = -viewportMargin * h;
+  const bottom = h + viewportMargin * h;
+  // A section's OWN lines (its title, its text or its parked line), not its whole
+  // box: a chapter's box spans its scenes, the top section's the whole book.
+  const near: string[] = [];
+  const seenIds = new Set<string>();
+  const parts = ed.view.dom.querySelectorAll(
+    '.ik-section__title, .ik-section__body, .ik-section__parked'
+  );
+  for (let i = 0; i < parts.length; i += 1) {
+    const r = parts[i].getBoundingClientRect();
+    if (r.bottom < top || r.top > bottom) continue;
+    const sec = parts[i].closest('[data-ik-section]');
+    const id = sec && sec.getAttribute('data-item-id');
+    if (!id || seenIds.has(id) || sec.getAttribute('data-open') !== 'true')
+      continue;
+    seenIds.add(id);
+    near.push(id);
+  }
+  const cursor = ed.isFocused ? cursorSectionId(ed) : null;
+  const key = `${cursor || ''}|${near.join(',')}`;
+  if (!force && key === lastViewport) return;
+  lastViewport = key;
+  post({
+    type: SectionEditorMessageType.Viewport,
+    payload: { near, cursor },
+  });
+}
+
+function scheduleViewport() {
+  if (viewportMargin < 0 || viewportTimer) return;
+  viewportTimer = setTimeout(() => reportViewport(), VIEWPORT_DELAY_MS);
+}
+
+let lastCursorSection: string | null = null;
+function installViewport(ed: any) {
+  if (viewportInstalled || !hasDom) return;
+  viewportInstalled = true;
+  window.addEventListener('scroll', scheduleViewport, { passive: true });
+  window.addEventListener('resize', scheduleViewport);
+  ed.on('selectionUpdate', () => {
+    const id = cursorSectionId(ed);
+    if (id !== lastCursorSection) {
+      lastCursorSection = id;
+      scheduleViewport();
+    }
+  });
+  ed.on('focus', scheduleViewport);
+}
+
+/** The first section title on screen, and where it is (kept in place across a window step). */
+function screenAnchor(ed: any): { el: any; top: number } | null {
+  const titles = ed.view.dom.querySelectorAll('.ik-section__title');
+  for (let i = 0; i < titles.length; i += 1) {
+    const r = titles[i].getBoundingClientRect();
+    if (r.bottom > 0) return { el: titles[i], top: r.top };
   }
   return null;
 }
@@ -291,9 +396,19 @@ function startDrag(itemId: string, event: any) {
 
 function buildSectionExtensions(untitledLabel: string) {
   return createSectionExtensions(
-    { Node, Extension, Plugin, PluginKey, dom: hasDom ? document : undefined },
+    {
+      Node,
+      Extension,
+      Plugin,
+      PluginKey,
+      Decoration,
+      DecorationSet,
+      dom: hasDom ? document : undefined,
+    },
     {
       untitledLabel,
+      onUnpark: (itemId) =>
+        post({ type: SectionEditorMessageType.Unpark, payload: { itemId } }),
       onChange: (changed) => {
         changed.forEach((parts, itemId) => {
           const prev = pending.get(itemId) || { title: false, body: false };
@@ -347,6 +462,35 @@ function handleSectionMessage(editor: any, message: SectionMessage): boolean {
       )
     )
       ed.view.dispatch(tr);
+    return true;
+  }
+  if (message.type === SectionActionType.Window) {
+    const { load, park, margin } = message.payload;
+    if (typeof margin === 'number') {
+      viewportMargin = margin;
+      installViewport(ed);
+    }
+    if (load.length || park.length) {
+      // What is waiting goes first: parking takes the text out of the document.
+      flushChanges();
+      const anchor = screenAnchor(ed);
+      const tr = ed.state.tr;
+      let changed = false;
+      for (const p of park)
+        if (parkSection(tr, p.itemId, p.label || null)) changed = true;
+      for (const l of load)
+        if (openSection(tr, l.itemId, blocksFromHtml(ed.schema, l.html || '')))
+          changed = true;
+      if (changed) {
+        ed.view.dispatch(tr);
+        // Keep the first title on screen where it was (text came or went above it).
+        if (anchor && anchor.el.isConnected) {
+          const delta = anchor.el.getBoundingClientRect().top - anchor.top;
+          if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+        }
+      }
+    }
+    reportViewport(true);
     return true;
   }
   if (message.type === SectionActionType.Close) {
@@ -458,6 +602,11 @@ export const SectionBridge = new BridgeExtension<
       sendBridgeMessage({
         type: SectionActionType.Replace,
         payload: { itemId, ...change },
+      }),
+    windowSections: (load, park, margin) =>
+      sendBridgeMessage({
+        type: SectionActionType.Window,
+        payload: { load, park, margin },
       }),
     requestSectionState: (requestId) =>
       sendBridgeMessage({

@@ -8,13 +8,20 @@
  * file in the 10tap-editor fork, as with richTextRadio.ts).
  *
  *   doc            → ikSection+
- *   ikSection      → ikSectionTitle ikSectionBody? ikSection*     attrs: itemId, open
+ *   ikSection      → ikSectionTitle ikSectionBody? ikSection*     attrs: itemId, open, parked, parkedLabel
  *   ikSectionTitle → text*            (plain: a title has no marks)   attrs: scene
  *   ikSectionBody  → block+           (the item's description, as rich text)
  *
  * Memory (the reason for D2): only OPEN sections hold their body. A closed section is
  * its title alone; its body is put in when it opens (`openSection`) and taken out when
  * it closes (`closeSection`), so the document never holds the whole book.
+ *
+ * Parked (the phones' text window, writing/writingWindow): a section that is OPEN in
+ * the app but whose text is out of the editor for now, because it is far from the
+ * caret and the screen. It keeps `open: true`, has no body, and shows a greyed line
+ * (its `parkedLabel`, e.g. "… 820 words") after its title; `parkSection` takes the
+ * text out and `openSection` puts it back. Both are LOADs: never edits, so a parked
+ * section is never saved, and never saved as empty (`sectionEdits`, `sectionSavePatch`).
  *
  * Saving: `changedSections(tr)` maps a transaction's steps to the sections whose title
  * or body they touched, so each edit saves to ITS item through the normal per-item
@@ -48,6 +55,10 @@ export interface SectionOutline {
   children: SectionOutline[];
   /** The title is a screenplay scene heading (writing/fountain fountainTitleRole): styled as one. */
   scene?: boolean;
+  /** Open, but its text is kept out of the editor for now (see Parked above). */
+  parked?: boolean;
+  /** The greyed line a parked section shows (the app's translated "… 820 words"). */
+  parkedLabel?: string;
 }
 
 /** The class a scene title carries (the Writing view's preview uses the same one). */
@@ -75,9 +86,12 @@ export function bodyJSON(blocks: any[] | null | undefined): any {
 export function buildSectionDocJSON(outline: SectionOutline[], bodyFor: (itemId: string) => any[] | null): any {
   const section = (node: SectionOutline): any => {
     const content: any[] = [titleJSON(node.title, !!node.scene)];
-    if (node.open) content.push(bodyJSON(bodyFor(node.itemId)));
+    const parked = !!node.open && !!node.parked;
+    if (node.open && !parked) content.push(bodyJSON(bodyFor(node.itemId)));
     for (const child of node.children) content.push(section(child));
-    return { type: SECTION_NODE, attrs: { itemId: node.itemId, open: !!node.open }, content };
+    const attrs: any = { itemId: node.itemId, open: !!node.open };
+    if (parked) { attrs.parked = true; attrs.parkedLabel = node.parkedLabel || null; }
+    return { type: SECTION_NODE, attrs, content };
   };
   // An empty outline still needs one section for `doc → ikSection+`; the view never
   // builds one (it shows the item itself as the top section).
@@ -117,7 +131,7 @@ export function findSection(doc: any, itemId: string): { pos: number; node: any 
   return found;
 }
 
-/** A section's title text and body node (null when closed). */
+/** A section's title text and body node (null when closed or parked). */
 export function readSection(sectionNode: any): { title: string; body: any | null } {
   let title = '';
   let body: any = null;
@@ -126,6 +140,53 @@ export function readSection(sectionNode: any): { title: string; body: any | null
     else if (child.type.name === SECTION_BODY_NODE) body = child;
   });
   return { title, body };
+}
+
+/** Whether a section is open but parked (its text out of the editor for now). */
+export function isSectionParked(doc: any, itemId: string): boolean {
+  const hit = findSection(doc, itemId);
+  return !!hit && !!hit.node.attrs.open && !!hit.node.attrs.parked;
+}
+
+/**
+ * What to save for each changed section, read from the document: its title, and its
+ * body node ONLY when the section holds one. A section with no body (closed or
+ * parked) never reports a body change, whatever `changed` says, so its text can
+ * never be saved as empty.
+ */
+export function sectionEdits(
+  doc: any,
+  changed: Map<string, { title: boolean; body: boolean }>,
+): Array<{ itemId: string; title: string; body: any | null; titleChanged: boolean; bodyChanged: boolean }> {
+  const out: Array<{ itemId: string; title: string; body: any | null; titleChanged: boolean; bodyChanged: boolean }> = [];
+  changed.forEach((parts, itemId) => {
+    const hit = findSection(doc, itemId);
+    if (!hit) return;
+    const { title, body } = readSection(hit.node);
+    const bodyChanged = !!parts.body && !!body;
+    if (!parts.title && !bodyChanged) return;
+    out.push({ itemId, title, body: bodyChanged ? body : null, titleChanged: !!parts.title, bodyChanged });
+  });
+  return out;
+}
+
+/**
+ * The item patch for one reported edit (the app's save): the title when it changed,
+ * the description only when the BODY changed and came with its text. `markdown` is
+ * the body as markdown, or null when the page sent none (a parked or closed section,
+ * a title-only edit): then the description is never touched.
+ */
+export function sectionSavePatch(
+  current: { title?: string | null; description?: string | null },
+  edit: { title: string; titleChanged: boolean; bodyChanged: boolean; markdown: string | null },
+): { title?: string; description?: string } {
+  const patch: { title?: string; description?: string } = {};
+  if (edit.titleChanged && edit.title !== (current.title || '')) patch.title = edit.title;
+  if (edit.bodyChanged && typeof edit.markdown === 'string') {
+    const md = edit.markdown.trim();
+    if (md !== String(current.description || '').trim()) patch.description = md;
+  }
+  return patch;
 }
 
 /** The structure as a string: ids with their parents, in order (cheap to compare). */
@@ -196,7 +257,7 @@ export function loadSectionDocument(tr: any, docJSON: any): any {
   return tr;
 }
 
-/** Put a body into a closed section (a LOAD transaction: nothing to save). */
+/** Put a body into a closed or parked section (a LOAD transaction: nothing to save). */
 export function openSection(tr: any, itemId: string, blocks: any[] | null): boolean {
   const hit = findSection(tr.doc, itemId);
   if (!hit) return false;
@@ -207,7 +268,7 @@ export function openSection(tr: any, itemId: string, blocks: any[] | null): bool
     const body = schema.nodeFromJSON(bodyJSON(blocks));
     tr.insert(pos + 1 + title.nodeSize, body);
   }
-  tr.setNodeMarkup(pos, undefined, { ...node.attrs, open: true });
+  tr.setNodeMarkup(pos, undefined, { ...node.attrs, open: true, parked: false, parkedLabel: null });
   tr.setMeta(LOAD_META, true);
   tr.setMeta(STRUCTURE_META, true);
   tr.setMeta('addToHistory', false);
@@ -228,7 +289,32 @@ export function closeSection(tr: any, itemId: string): boolean {
     if (child.type.name === SECTION_BODY_NODE) { bodyAt = childOffset; bodySize = child.nodeSize; }
   });
   if (bodyAt >= 0) tr.delete(pos + 1 + bodyAt, pos + 1 + bodyAt + bodySize);
-  tr.setNodeMarkup(pos, undefined, { ...node.attrs, open: false });
+  tr.setNodeMarkup(pos, undefined, { ...node.attrs, open: false, parked: false, parkedLabel: null });
+  tr.setMeta(LOAD_META, true);
+  tr.setMeta(STRUCTURE_META, true);
+  tr.setMeta('addToHistory', false);
+  return true;
+}
+
+/**
+ * Park an open (or closed) section: its text leaves the editor, it stays OPEN, and it
+ * shows `label` after its title until `openSection` loads it again. A LOAD: the
+ * caller saves the body first if it was changed (the page flushes what is waiting),
+ * and nothing here is ever reported as an edit. A label change alone also goes
+ * through here.
+ */
+export function parkSection(tr: any, itemId: string, label: string | null): boolean {
+  const hit = findSection(tr.doc, itemId);
+  if (!hit) return false;
+  const { node, pos } = hit;
+  let bodyAt = -1;
+  let bodySize = 0;
+  node.forEach((child: any, childOffset: number) => {
+    if (child.type.name === SECTION_BODY_NODE) { bodyAt = childOffset; bodySize = child.nodeSize; }
+  });
+  if (bodyAt < 0 && node.attrs.open && node.attrs.parked && node.attrs.parkedLabel === (label || null)) return false;
+  if (bodyAt >= 0) tr.delete(pos + 1 + bodyAt, pos + 1 + bodyAt + bodySize);
+  tr.setNodeMarkup(pos, undefined, { ...node.attrs, open: true, parked: true, parkedLabel: label || null });
   tr.setMeta(LOAD_META, true);
   tr.setMeta(STRUCTURE_META, true);
   tr.setMeta('addToHistory', false);
@@ -303,6 +389,10 @@ export interface SectionExtensionDeps {
   /** The page's document (`window.document`), for the fold button's node view.
    *  Shared code never touches the DOM itself; without it sections render plain. */
   dom?: { createElement: (tag: string) => any };
+  /** ProseMirror's Decoration / DecorationSet (@tiptap/pm/view), for a parked
+   *  section's greyed line; without them (or `dom`) a parked section shows its title only. */
+  Decoration?: any;
+  DecorationSet?: any;
 }
 
 export interface SectionExtensionOptions {
@@ -314,6 +404,8 @@ export interface SectionExtensionOptions {
   onMenu?: (itemId: string, anchor: any) => void;
   /** A press began on the drag handle: the app starts its shared-dnd drag of the item. */
   onDragStart?: (itemId: string, event: any, handle: any) => void;
+  /** A parked section's greyed line was tapped: the app loads its text (`openSection`). */
+  onUnpark?: (itemId: string) => void;
   /** Greyed text for a title with nothing in it (the app's translated "Untitled"). */
   untitledLabel?: string;
 }
@@ -333,7 +425,7 @@ export function sectionHeadingLevel(depth: number): number {
  * (`.ik-section__menu`). None of them are part of the document.
  */
 export function createSectionExtensions(deps: SectionExtensionDeps, options: SectionExtensionOptions = {}): any[] {
-  const { Node, Extension, Plugin, PluginKey, dom: domPort } = deps;
+  const { Node, Extension, Plugin, PluginKey, dom: domPort, Decoration, DecorationSet } = deps;
 
   const SectionDocument = Node.create({
     name: 'doc',
@@ -361,6 +453,8 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
       return {
         itemId: { default: null, parseHTML: (el: any) => el.getAttribute('data-item-id'), renderHTML: (a: any) => ({ 'data-item-id': a.itemId }) },
         open: { default: false, parseHTML: (el: any) => el.getAttribute('data-open') === 'true', renderHTML: (a: any) => ({ 'data-open': a.open ? 'true' : 'false' }) },
+        parked: { default: false, parseHTML: (el: any) => el.getAttribute('data-parked') === 'true', renderHTML: (a: any) => (a.parked ? { 'data-parked': 'true' } : {}) },
+        parkedLabel: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       };
     },
     parseHTML() { return [{ tag: 'section[data-ik-section]' }]; },
@@ -395,6 +489,7 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
         const paint = () => {
           dom.setAttribute('data-item-id', current.attrs.itemId || '');
           dom.setAttribute('data-open', current.attrs.open ? 'true' : 'false');
+          dom.setAttribute('data-parked', current.attrs.parked ? 'true' : 'false');
           dom.setAttribute('data-depth', String(depth()));
           fold.textContent = current.attrs.open ? '▾' : '▸';
           fold.setAttribute('aria-expanded', current.attrs.open ? 'true' : 'false');
@@ -494,6 +589,45 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
     renderHTML() { return ['div', { 'data-ik-section-body': '', class: 'ik-section__body' }, 0]; },
   });
 
+  // A parked section's greyed line ("… 820 words"), after its title: a widget, so it
+  // is never part of the text. Rebuilt on loads and structure changes (the only
+  // transactions that park or load), mapped through typing.
+  const parkedKey = new PluginKey('ikSectionsParked');
+  const parkedDecorations = (doc: any): any => {
+    const decos: any[] = [];
+    for (const s of listSections(doc)) {
+      const attrs = s.node.attrs;
+      if (!attrs.open || !attrs.parked) continue;
+      const id = attrs.itemId;
+      const label = attrs.parkedLabel || '…';
+      const at = s.pos + 1 + s.node.firstChild.nodeSize;
+      decos.push(Decoration.widget(at, () => {
+        const el = domPort!.createElement('div');
+        el.className = 'ik-section__parked';
+        el.contentEditable = 'false';
+        el.setAttribute('data-item-id', id);
+        el.setAttribute('role', 'button');
+        el.textContent = label;
+        el.addEventListener('mousedown', (e: any) => e.preventDefault());
+        el.addEventListener('click', (e: any) => { e.preventDefault(); options.onUnpark?.(id); });
+        return el;
+      }, { key: `parked:${id}:${label}`, side: -1, ignoreSelection: true, stopEvent: () => true }));
+    }
+    return DecorationSet.create(doc, decos);
+  };
+  const parkedPlugins = Decoration && DecorationSet && domPort ? [new Plugin({
+    key: parkedKey,
+    state: {
+      init: (_config: any, state: any) => parkedDecorations(state.doc),
+      apply: (tr: any, old: any) => {
+        if (!tr.docChanged) return old;
+        if (tr.getMeta(LOAD_META) || tr.getMeta(STRUCTURE_META)) return parkedDecorations(tr.doc);
+        return old.map(tr.mapping, tr.doc);
+      },
+    },
+    props: { decorations: (state: any) => parkedKey.getState(state) },
+  })] : [];
+
   const key = new PluginKey('ikSections');
   const SectionBehaviour = Extension.create({
     name: 'ikSectionBehaviour',
@@ -538,6 +672,7 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
             return null;
           },
         }),
+        ...parkedPlugins,
       ];
     },
   });
