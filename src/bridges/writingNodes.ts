@@ -211,6 +211,14 @@ export function definitionListOf(source: string): Array<{ terms: string[]; defs:
   return groups;
 }
 
+/**
+ * Text from an atom's markdown source as the preview shows it: a backslash
+ * escape (`\$5`, `\*`) draws as the character alone. The source keeps it.
+ */
+export function writingDisplayText(text: string): string {
+  return text.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+
 /** The highest numbered footnote label in an editor document, plus one. */
 function nextFootnoteNumber(doc: any): number {
   let max = 0;
@@ -284,8 +292,8 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
     if (kind === 'defList') {
       const list = el('dl', 'ik-wr__dl');
       definitionListOf(source).forEach((g) => {
-        g.terms.forEach((term) => list.appendChild(el('dt', '', term)));
-        g.defs.forEach((def) => list.appendChild(el('dd', '', def)));
+        g.terms.forEach((term) => list.appendChild(el('dt', '', writingDisplayText(term))));
+        g.defs.forEach((def) => list.appendChild(el('dd', '', writingDisplayText(def))));
       });
       view.appendChild(list);
       return;
@@ -296,21 +304,22 @@ export function createWritingExtensions(deps: WritingExtensionDeps, options: Wri
       notes.forEach((note) => {
         const line = el('div', 'ik-wr__fndef');
         line.appendChild(el('span', 'ik-wr__fnlabel', footnoteLabelOf(note)));
-        line.appendChild(domPort!.createElement('span')).textContent = note.replace(/^\[\^[^\]\s]+\]:[ \t]?/, '');
+        line.appendChild(domPort!.createElement('span')).textContent = writingDisplayText(note.replace(/^\[\^[^\]\s]+\]:[ \t]?/, ''));
         view.appendChild(line);
       });
       return;
     }
     const parts = criticPartsOf(source);
-    if (parts.kind === 'ins') view.appendChild(el('ins', 'critic-ins', parts.text));
-    else if (parts.kind === 'del') view.appendChild(el('del', 'critic-del', parts.text));
+    const shown = (text: string) => writingDisplayText(text);
+    if (parts.kind === 'ins') view.appendChild(el('ins', 'critic-ins', shown(parts.text)));
+    else if (parts.kind === 'del') view.appendChild(el('del', 'critic-del', shown(parts.text)));
     else if (parts.kind === 'sub') {
-      view.appendChild(el('del', 'critic-del', parts.text));
-      view.appendChild(el('ins', 'critic-ins', parts.next || ''));
+      view.appendChild(el('del', 'critic-del', shown(parts.text)));
+      view.appendChild(el('ins', 'critic-ins', shown(parts.next || '')));
     } else if (parts.kind === 'mark') {
-      view.appendChild(el('mark', 'critic-mark', parts.text));
-      if (parts.comment !== undefined) view.appendChild(el('span', 'critic-comment', parts.comment));
-    } else if (parts.kind === 'comment') view.appendChild(el('span', 'critic-comment', parts.comment || ''));
+      view.appendChild(el('mark', 'critic-mark', shown(parts.text)));
+      if (parts.comment !== undefined) view.appendChild(el('span', 'critic-comment', shown(parts.comment)));
+    } else if (parts.kind === 'comment') view.appendChild(el('span', 'critic-comment', shown(parts.comment || '')));
     else view.textContent = source;
   };
 
