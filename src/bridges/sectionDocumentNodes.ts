@@ -408,6 +408,25 @@ export interface SectionExtensionOptions {
   onUnpark?: (itemId: string) => void;
   /** Greyed text for a title with nothing in it (the app's translated "Untitled"). */
   untitledLabel?: string;
+  /**
+   * "+ Add item at top" / "+ Add item" inside each open section that has sections under
+   * it (the Writing view's writing.addBoxes): read on every rebuild, so the app can turn
+   * them on and off and then call `refreshAddBoxes(editor)`. Not part of the document.
+   */
+  addBoxes?: () => boolean;
+  /** The boxes' labels (translated). */
+  addLabels?: { top: string; bottom: string };
+  /** A box was pressed: the app adds an item first (top) or last (bottom) under `itemId`. */
+  onAdd?: (itemId: string, where: 'top' | 'bottom') => void;
+}
+
+/** The meta that makes the add boxes redraw (after the app turns them on or off). */
+export const ADD_BOXES_META = 'ikSectionAddBoxes';
+
+/** Redraw the add boxes now (`editor` is the TipTap editor). */
+export function refreshAddBoxes(editor: any): void {
+  if (!editor || !editor.view) return;
+  editor.view.dispatch(editor.state.tr.setMeta(ADD_BOXES_META, true));
 }
 
 /** The heading level of a title: H1 for the view's top item, one more per level, H6 at most. */
@@ -628,6 +647,55 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
     props: { decorations: (state: any) => parkedKey.getState(state) },
   })] : [];
 
+  // The add boxes (writing.addBoxes): a widget before an open section's first section and one
+  // after its last, so they never become text. Rebuilt on loads, structure changes, opening
+  // or closing and ADD_BOXES_META; mapped through typing.
+  const addKey = new PluginKey('ikSectionsAdd');
+  const addDecorations = (doc: any): any => {
+    if (!options.addBoxes || !options.addBoxes()) return DecorationSet.empty;
+    const decos: any[] = [];
+    const box = (at: number, id: string, where: 'top' | 'bottom', side: number) => decos.push(Decoration.widget(at, () => {
+      const el = domPort!.createElement('button');
+      el.type = 'button';
+      el.className = 'ik-writing-add';
+      el.contentEditable = 'false';
+      el.setAttribute('data-ik-add', `${id}|${where}`);
+      el.setAttribute('data-testid', `writing-add-${where}-${id}`);
+      el.textContent = `+ ${(where === 'top' ? options.addLabels?.top : options.addLabels?.bottom) || ''}`;
+      el.addEventListener('mousedown', (e: any) => e.preventDefault());
+      el.addEventListener('click', (e: any) => { e.preventDefault(); options.onAdd?.(id, where); });
+      return el;
+    }, { key: `add:${id}:${where}`, side, ignoreSelection: true, stopEvent: () => true }));
+    for (const s of listSections(doc)) {
+      if (s.depth < 2 || !s.node.attrs.open) continue;
+      let first = -1;
+      s.node.forEach((child: any, childOffset: number) => {
+        if (child.type.name === SECTION_NODE && first < 0) first = childOffset;
+      });
+      if (first < 0) continue;
+      const id = s.node.attrs.itemId;
+      box(s.pos + 1 + first, id, 'top', -1);
+      box(s.pos + s.node.nodeSize - 1, id, 'bottom', 1);
+    }
+    return DecorationSet.create(doc, decos);
+  };
+  const openSignature = (doc: any): string => listSections(doc).map((s) => (s.node.attrs.open ? '1' : '0')).join('');
+  const addPlugins = Decoration && DecorationSet && domPort && options.onAdd ? [new Plugin({
+    key: addKey,
+    state: {
+      init: (_config: any, state: any) => addDecorations(state.doc),
+      apply: (tr: any, old: any, oldState: any) => {
+        if (tr.getMeta(ADD_BOXES_META)) return addDecorations(tr.doc);
+        if (!tr.docChanged) return old;
+        // Off: nothing to keep up to date (and no walk of a long book on every key).
+        if (!options.addBoxes || !options.addBoxes()) return DecorationSet.empty;
+        if (tr.getMeta(LOAD_META) || tr.getMeta(STRUCTURE_META) || openSignature(tr.doc) !== openSignature(oldState.doc)) return addDecorations(tr.doc);
+        return old.map(tr.mapping, tr.doc);
+      },
+    },
+    props: { decorations: (state: any) => addKey.getState(state) },
+  })] : [];
+
   const key = new PluginKey('ikSections');
   const SectionBehaviour = Extension.create({
     name: 'ikSectionBehaviour',
@@ -673,6 +741,7 @@ export function createSectionExtensions(deps: SectionExtensionDeps, options: Sec
           },
         }),
         ...parkedPlugins,
+        ...addPlugins,
       ];
     },
   });

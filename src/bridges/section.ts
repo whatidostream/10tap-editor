@@ -22,6 +22,7 @@ import {
   readSection,
   SECTION_NODE,
   type SectionOutline,
+  refreshAddBoxes,
 } from './sectionDocumentNodes';
 
 /**
@@ -42,7 +43,8 @@ import {
  * requestSectionState. Editor → app (editor.sectionListener): section-changed
  * [{ itemId, title, html }], section-toggle, section-menu, section-drop,
  * section-state, section-viewport (the open sections on or near the screen,
- * and the caret's), section-unpark (a parked section's line was tapped).
+ * and the caret's), section-unpark (a parked section's line was tapped),
+ * section-add (an add box was pressed). App → editor also setAddBoxes.
  */
 
 export enum SectionActionType {
@@ -52,6 +54,7 @@ export enum SectionActionType {
   Replace = 'section-replace',
   State = 'section-state-request',
   Window = 'section-window',
+  AddBoxes = 'section-add-boxes',
 }
 
 export enum SectionEditorMessageType {
@@ -62,6 +65,7 @@ export enum SectionEditorMessageType {
   State = 'section-state',
   Viewport = 'section-viewport',
   Unpark = 'section-unpark',
+  Add = 'section-add',
 }
 
 export type SectionEditorMessage =
@@ -96,7 +100,11 @@ export type SectionEditorMessage =
       type: SectionEditorMessageType.Viewport;
       payload: { near: string[]; cursor: string | null };
     }
-  | { type: SectionEditorMessageType.Unpark; payload: { itemId: string } };
+  | { type: SectionEditorMessageType.Unpark; payload: { itemId: string } }
+  | {
+      type: SectionEditorMessageType.Add;
+      payload: { itemId: string; where: 'top' | 'bottom' };
+    };
 
 type SectionMessage =
   | {
@@ -123,6 +131,10 @@ type SectionMessage =
         margin?: number;
       };
     }
+  | {
+      type: SectionActionType.AddBoxes;
+      payload: { on: boolean; top: string; bottom: string };
+    }
   | SectionEditorMessage;
 
 type SectionEditorInstance = {
@@ -138,6 +150,8 @@ type SectionEditorInstance = {
     change: { title?: string; html?: string; scene?: boolean }
   ) => void;
   requestSectionState: (requestId: string) => void;
+  /** The Writing view's add boxes inside open sections (writing.addBoxes), with their labels. */
+  setAddBoxes: (on: boolean, top: string, bottom: string) => void;
   /**
    * The text window: load these sections' text and park these (open, title and a
    * greyed label only), in one step that keeps what is on screen where it is.
@@ -169,6 +183,9 @@ const post = (message: SectionEditorMessage) => {
 // ---------------------------------------------------------------------------
 
 let currentEditor: any = null;
+// The add boxes (section-add-boxes): off until the app says otherwise.
+let addBoxesOn = false;
+const addLabels = { top: '', bottom: '' };
 const pending = new Map<string, { title: boolean; body: boolean }>();
 let flushTimer: any = null;
 const CHANGE_DELAY_MS = 250;
@@ -407,6 +424,15 @@ function buildSectionExtensions(untitledLabel: string) {
     },
     {
       untitledLabel,
+      addBoxes: () => addBoxesOn,
+      addLabels,
+      onAdd: (itemId, where) => {
+        flushChanges();
+        post({
+          type: SectionEditorMessageType.Add,
+          payload: { itemId, where },
+        });
+      },
       onUnpark: (itemId) =>
         post({ type: SectionEditorMessageType.Unpark, payload: { itemId } }),
       onChange: (changed) => {
@@ -491,6 +517,13 @@ function handleSectionMessage(editor: any, message: SectionMessage): boolean {
       }
     }
     reportViewport(true);
+    return true;
+  }
+  if (message.type === SectionActionType.AddBoxes) {
+    addBoxesOn = !!message.payload.on;
+    addLabels.top = message.payload.top || '';
+    addLabels.bottom = message.payload.bottom || '';
+    refreshAddBoxes(ed);
     return true;
   }
   if (message.type === SectionActionType.Close) {
@@ -607,6 +640,11 @@ export const SectionBridge = new BridgeExtension<
       sendBridgeMessage({
         type: SectionActionType.Window,
         payload: { load, park, margin },
+      }),
+    setAddBoxes: (on, top, bottom) =>
+      sendBridgeMessage({
+        type: SectionActionType.AddBoxes,
+        payload: { on, top, bottom },
       }),
     requestSectionState: (requestId) =>
       sendBridgeMessage({
